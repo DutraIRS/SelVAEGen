@@ -18,7 +18,7 @@ utils/                 losses, metrics, statistics, data and experiment plumbing
 
 ## Environment
 
-In the following, Ubuntu 22.04.4 LTS, Python 3.11.0, and CUDA 12.4 are assumed. Minor adaptations may be required according to available hardware.
+In the following, Ubuntu 22.04.4 LTS, Python 3.11.0, and CUDA 12.4 are assumed. Minor adaptations may be required according to available GPU.
 
 ### Setting up an environment
 To create a virtual environment and install dependencies, run the following commands:
@@ -29,8 +29,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Computing fingerprints and embeddings
-To pre-compute drug fingerprints and protein embeddings, run the following scripts:
+### Computing fingerprints, embeddings and similarity matrices
+To pre-compute drug fingerprints, protein embeddings and protein similarity matrices, run the following scripts:
 
 ```bash
 python scripts/compute_fingerprints.py
