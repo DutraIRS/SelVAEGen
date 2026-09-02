@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 
 from . import apply_style, save_figure, save_plot_data
-from .experiment_results import BRANCH_AGGREGATION, DECISION_METRIC, SUCCESS_THRESHOLD, branch_decision
+from .experiment_results import (BRANCH_AGGREGATION, DECISION_METRIC, SUCCESS_THRESHOLD,
+                            branch_decision, decision_column)
 
 apply_style()
 
@@ -218,14 +219,6 @@ def _metric_panel(axes, frame, arm_column, column, order, label=None, threshold=
 
     return True
 
-def _metric_column(frame, branch, metric, oracle):
-    """The column holding this metric, whichever shape the experiment wrote."""
-    for candidate in (f"{branch}_{metric}", f"{branch}_{oracle}_{metric}"):
-        if candidate in frame and frame[candidate].notna().any():
-            return candidate
-
-    return None
-
 def describe_arms(frame, arm_column, path=None):
     """mean, std and n of every recorded metric per arm, with no test or correction."""
     columns = [c for c in frame.columns if c.startswith(("seq_", "graph_"))
@@ -306,7 +299,7 @@ def plot_metric_boxes(frame, arm_column, directory, branches=("seq", "graph"),
 
     for branch in branches:
         for group, metrics in groups.items():
-            panels = [(_metric_column(frame, branch, name, oracle),
+            panels = [(decision_column(frame, branch, name, oracle),
                         _metric_label(name))
                         for name in metrics]
             panels = [(column, label) for column, label in panels if column is not None]
@@ -412,7 +405,7 @@ def plot_metric_curves(frame, x_column, arm_column, directory, branches=("seq", 
 
     for branch in branches:
         for group, metrics in groups.items():
-            panels = [(_metric_column(frame, branch, name, oracle),
+            panels = [(decision_column(frame, branch, name, oracle),
                         _metric_label(name))
                         for name in metrics]
             panels = [(column, label) for column, label in panels if column is not None]
