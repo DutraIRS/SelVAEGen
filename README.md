@@ -29,13 +29,14 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Computing fingerprints, embeddings and similarity matrices
-To pre-compute drug fingerprints, protein embeddings and protein similarity matrices, run the following scripts:
+### Computing fingerprints and protein data
+To pre-compute drug fingerprints, protein embeddings, names and similarity matrices, run the following scripts:
 
 ```bash
 python scripts/compute_fingerprints.py
 python scripts/compute_embeddings.py
 python scripts/run_blast.py
+python scripts/fetch_protein_names.py
 ```
 
 ## Running experiments
