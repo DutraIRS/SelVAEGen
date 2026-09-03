@@ -96,7 +96,7 @@ def _metric_bounds(column, threshold=None):
     """(ylim, reference line) for a column, each None where it does not apply."""
     limits = (-0.02, 1.02) if column.endswith(BOUNDED_METRICS) else None
     if column.endswith("directional_consistency"):
-        limits = (0.25, 0.75)
+        limits = (0.45, 0.75)
 
     if threshold is not None and column.endswith(THRESHOLD_METRICS):
         return limits, float(threshold)
@@ -146,8 +146,17 @@ def _metric_label(name):
 
     return label[:1].upper() + label[1:]
 
-BOX_PALETTE = ["#6b8cc7", "#7fb08a", "#d3a04f", "#b57ea8", "#5fa8a0",
-                "#c78b6b", "#8f8fbf", "#a8b06b", "#c76b7e"]
+HIGHLIGHT_COLOUR = "#e34948"
+BASELINE_COLOUR = "#7d8790"
+HIGHLIGHT_ARMS = ("SelVAEGen", "seq->seq", "selfies",
+                    "affinity+selectivity+distributional")
+
+
+def box_colour(arm, highlight=None):
+    """Red for the arm under test, one shared grey for everything it is compared against."""
+    wanted = HIGHLIGHT_ARMS if highlight is None else highlight
+
+    return HIGHLIGHT_COLOUR if str(arm) in wanted else BASELINE_COLOUR
 
 def _panel_grid(count, width=3.6, height=3.7, max_row=5, columns=3):
     """(figure, flat axes) for `count` panels: one row up to `max_row`, else `columns` wide."""
@@ -167,6 +176,24 @@ def _panel_grid(count, width=3.6, height=3.7, max_row=5, columns=3):
 
     return figure, flat[:count]
 
+def stack_xlabels(cells):
+    columns = cells[0].get_subplotspec().get_gridspec().ncols
+    for index, axes in enumerate(cells):
+        if index + columns < len(cells):
+            axes.set_xticklabels([])
+
+
+BRANCH_NAMES = {"gnn": "Graph", "seq": "Sequence", "both": "Both"}
+
+
+def arm_label(name):
+    text = str(name)
+    if "->" not in text:
+        return text
+
+    return r" $\rightarrow$ ".join(BRANCH_NAMES.get(part, part) for part in text.split("->"))
+
+
 def _metric_group_grid(group, count):
     """The shared layout for metric boxes and metric curves."""
     if group == "potency_chemistry" and count == 8:
@@ -174,7 +201,8 @@ def _metric_group_grid(group, count):
 
     return _panel_grid(count)
 
-def _metric_panel(axes, frame, arm_column, column, order, label=None, threshold=None):
+def _metric_panel(axes, frame, arm_column, column, order, label=None, threshold=None,
+                    highlight=None):
     """One metric: a box per arm, with every seed drawn on its own box."""
     values, names = [], []
     for arm in order:
@@ -194,23 +222,26 @@ def _metric_panel(axes, frame, arm_column, column, order, label=None, threshold=
                             whiskerprops={"color": "#67727e"},
                             capprops={"color": "#67727e"}, showfliers=False)
 
-    for patch, colour in zip(boxes["boxes"], BOX_PALETTE * 4):
-        patch.set(facecolor=colour, alpha=0.42, edgecolor=colour, linewidth=1.3)
+    for patch, arm in zip(boxes["boxes"], names):
+        colour = box_colour(arm, highlight)
+        patch.set(facecolor=colour, edgecolor=colour,
+                    linewidth=1.8 if colour == HIGHLIGHT_COLOUR else 1.1)
 
     jitter = np.random.default_rng(0)
     for position, seeds in zip(positions, values):
-        axes.scatter(position + jitter.uniform(-0.14, 0.14, seeds.size), seeds, s=13,
-                        zorder=3, color="#2c3540", alpha=0.72, linewidths=0)
+        axes.scatter(position + jitter.uniform(-0.14, 0.14, seeds.size), seeds, s=15,
+                        zorder=3, color="#ffffff", edgecolors="#11181f", linewidths=0.7)
 
     limits, null = _metric_bounds(column, threshold)
     if limits is not None:
         axes.set_ylim(*limits)
     if null is not None:
-        axes.axhline(null, color="#b0392b", linestyle="--", linewidth=0.9, alpha=0.7,
-                        zorder=1)
+        # neutral, so red stays the mark of the arm under test and nothing else
+        axes.axhline(null, color="#67727e", linestyle="--", linewidth=0.9, zorder=1)
 
     axes.set_xticks(positions)
-    axes.set_xticklabels(names, rotation=30, ha="right", fontsize=11)
+    axes.set_xticklabels([arm_label(name) for name in names], rotation=30,
+                            ha="right", fontsize=11)
     axes.set_ylabel(_axis_label(label or column), fontsize=13)
     axes.grid(axis="y", alpha=0.25, linewidth=0.6)
     axes.set_axisbelow(True)
@@ -286,8 +317,24 @@ def plot_decision(frame, arm_column, path, order=None, metric=None, aggregation=
 
     return path
 
+def merge_branch_columns(frame, branches, metric, oracle):
+    columns = [column for column in (decision_column(frame, branch, metric, oracle)
+                                        for branch in branches) if column is not None]
+    if not columns:
+        return None, frame
+
+    merged = f"{oracle}_{metric}"
+    frame = frame.copy()
+    frame[merged] = frame[columns[0]]
+    for column in columns[1:]:
+        frame[merged] = frame[merged].fillna(frame[column])
+
+    return merged, frame
+
+
 def plot_metric_boxes(frame, arm_column, directory, branches=("seq", "graph"),
-                        groups=None, order=None, oracle="MeanOracle"):
+                        groups=None, order=None, oracle="MeanOracle", highlight=None,
+                        merge_branches=False):
     """One figure per decoder branch per metric group: a box per arm, every seed on it."""
     from matplotlib import pyplot as plt
 
@@ -296,6 +343,40 @@ def plot_metric_boxes(frame, arm_column, directory, branches=("seq", "graph"),
     directory.mkdir(parents=True, exist_ok=True)
     threshold = frame_threshold(frame)
     written = []
+
+    if merge_branches:
+        for group, metrics in groups.items():
+            panels, merged_frame = [], frame
+            for name in metrics:
+                column, merged_frame = merge_branch_columns(merged_frame, branches, name, oracle)
+                if column is not None:
+                    panels.append((column, _metric_label(name)))
+            if not panels:
+                continue
+
+            columns = [column for column, _ in panels]
+            arms = list(order) if order else sorted(frame[arm_column].dropna().unique())
+            arms = [arm for arm in arms
+                    if merged_frame.loc[merged_frame[arm_column] == arm, columns].notna().any().any()]
+            if len(arms) < 2:
+                continue
+
+            figure, cells = _metric_group_grid(group, len(panels))
+            drawn = [_metric_panel(one, merged_frame, arm_column, column, arms, label,
+                                    threshold, highlight)
+                        for one, (column, label) in zip(cells, panels)]
+            if not any(drawn):
+                plt.close(figure)
+                continue
+
+            stack_xlabels(cells)
+
+            path = directory / f"{group}.pdf"
+            save_plot_data(path, merged_frame[[arm_column, "seed"] + columns])
+            _save(figure, path)
+            written.append(path)
+
+        return written
 
     for branch in branches:
         for group, metrics in groups.items():
@@ -316,12 +397,15 @@ def plot_metric_boxes(frame, arm_column, directory, branches=("seq", "graph"),
                 continue
 
             figure, cells = _metric_group_grid(group, len(panels))
-            drawn = [_metric_panel(one, frame, arm_column, column, arms, label, threshold)
+            drawn = [_metric_panel(one, frame, arm_column, column, arms, label, threshold,
+                                    highlight)
                         for one, (column, label) in zip(cells, panels)]
 
             if not any(drawn):
                 plt.close(figure)
                 continue
+
+            stack_xlabels(cells)
 
             path = directory / f"{branch}_{group}.pdf"
             save_plot_data(path, frame[[arm_column, "seed"] + columns])
@@ -375,8 +459,8 @@ def _curve_panel(axes, frame, x_column, arm_column, column, arms, label=None,
     if limits is not None:
         axes.set_ylim(*limits)
     if null is not None:
-        axes.axhline(null, color="#b0392b", linestyle="--", linewidth=0.9, alpha=0.7,
-                        zorder=1)
+        # neutral, so red stays the mark of the arm under test and nothing else
+        axes.axhline(null, color="#67727e", linestyle="--", linewidth=0.9, zorder=1)
     if reference is not None:
         # where every other experiment generated, so the curve is read against it
         axes.axvline(reference, color="#67727e", linestyle=":", linewidth=1.0, alpha=0.8,
