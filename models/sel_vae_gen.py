@@ -424,7 +424,8 @@ class SelVAEGen(nn.Module): # so pretty :)
 
 def build_selvaegen(tokenizer, protein_dim, max_nodes, max_smiles_len, criterion,
                     gnn_encoder=True, seq_encoder=True, gnn_decoder=True, seq_decoder=True,
-                    fusion_dim=512, fingerprint_dim=512):
+                    fusion_dim=512, fingerprint_dim=512,
+                    seq_layers=4, seq_heads=8, seq_ff_dim=1024, seq_dropout=0.1):
     """Assemble the requested branches."""
     # ResidualProteinPrior starts as the identity, so the latent matches the embedding width
     latent_dim = protein_dim
@@ -434,10 +435,14 @@ def build_selvaegen(tokenizer, protein_dim, max_nodes, max_smiles_len, criterion
         gnn_decoder=(GNNDecoder(latent_dim=latent_dim, max_nodes=max_nodes,
                                 protein_dim=protein_dim) if gnn_decoder else None),
         seq_encoder=(SequenceEncoder(tokenizer.vocab_size, d_model=fusion_dim,
+                                    num_layers=seq_layers, num_heads=seq_heads,
+                                    ff_dim=seq_ff_dim, dropout=seq_dropout,
                                     max_length=max_smiles_len, pad_id=tokenizer.pad_id)
                         if seq_encoder else None),
         seq_decoder=(SequenceDecoder(tokenizer.vocab_size, tokenizer=tokenizer,
                                     latent_dim=latent_dim, d_model=fusion_dim,
+                                    num_layers=seq_layers, num_heads=seq_heads,
+                                    ff_dim=seq_ff_dim, dropout=seq_dropout,
                                     max_length=max_smiles_len, protein_dim=protein_dim)
                         if seq_decoder else None),
         fusion=MultiViewFusion(dim=fusion_dim, fingerprint_dim=fingerprint_dim),
