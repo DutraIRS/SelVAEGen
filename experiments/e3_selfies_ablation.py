@@ -55,7 +55,7 @@ LOSS_WEIGHTS = dict(w_seq=4.0, w_graph=1.0, w_kl_mean=0.02, w_kl_var=1.0,
 
 EXPERIMENT = "e3_selfies"
 DECISION_METRIC = "seq_validity"
-TEST_METRICS = [DECISION_METRIC, "seq_delta_score"]
+TEST_METRICS = [DECISION_METRIC, "seq_effective_delta"]
 
 
 
