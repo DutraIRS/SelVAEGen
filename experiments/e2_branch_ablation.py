@@ -32,6 +32,8 @@ USE_SELFIES = True
 
 SEEDS = env_seeds("E2_SEEDS", range(5))
 BRANCHES = ["gnn", "seq", "both"]
+DECODERS = ["gnn", "seq"]
+ARMS = [f"{encoder}->{decoder}" for encoder in BRANCHES for decoder in DECODERS]
 
 EPOCHS = 150
 PATIENCE = 30
@@ -56,7 +58,7 @@ LOSS_WEIGHTS = dict(w_seq=4.0, w_graph=1.0, w_kl_mean=0.02, w_kl_var=1.0,
                     distribution_mean_margin=10.0, distribution_effect_margin=2.0)
 
 EXPERIMENT = "e2_branch"
-CONCURRENT_ARMS = 9
+CONCURRENT_ARMS = 6
 
 
 def branch_flags(encoder, decoder):
@@ -72,10 +74,9 @@ def main():
     dataset = DATASET
     output = experiment_dir(dataset, EXPERIMENT)
     save_config(output, sys.modules[__name__])
-    records, finished = collect_runs(output, ("seed", "arm"), valid={"seed": SEEDS})
-    all_arms = [f"{encoder}->{decoder}" for encoder in BRANCHES for decoder in BRANCHES]
+    records, finished = collect_runs(output, ("seed", "arm"), valid={"seed": SEEDS, "arm": ARMS})
 
-    if grid_complete(finished, [{"seed": seed, "arm": arm} for seed in SEEDS for arm in all_arms], "runs"):
+    if grid_complete(finished, [{"seed": seed, "arm": arm} for seed in SEEDS for arm in ARMS], "runs"):
         # nothing to train
         frame = pd.DataFrame(records)
         write_analysis(frame, output)
@@ -90,7 +91,7 @@ def main():
     fingerprint_pca = load_fingerprint_pca(dataset)
 
     for seed in SEEDS:
-        if all(finished(seed=seed, arm=arm) for arm in all_arms):
+        if all(finished(seed=seed, arm=arm) for arm in ARMS):
             continue                              # every arm of this seed already ran
 
         torch.manual_seed(seed)
@@ -112,7 +113,7 @@ def main():
         known = training_smiles(train_loader)
         activations = metrics.chemnet_activations([Chem.MolToSmiles(mol) for mol in reference if mol is not None])
 
-        pending = [(encoder, decoder) for encoder in BRANCHES for decoder in BRANCHES
+        pending = [(encoder, decoder) for encoder in BRANCHES for decoder in DECODERS
                     if not finished(seed=seed, arm=f"{encoder}->{decoder}")]
 
         torch.manual_seed(seed)
@@ -192,7 +193,7 @@ def main():
                                 "best_epoch": best_epoch, "best_val_loss": best_loss,
                                 **summary, **history[best_epoch - 1], **scores})
                 record_run(stem, records[-1])
-                records, finished = collect_runs(output, ("seed", "arm"), valid={"seed": SEEDS})
+                records, finished = collect_runs(output, ("seed", "arm"), valid={"seed": SEEDS, "arm": ARMS})
 
             for arm in arms:
                 del arm["model"], arm["optimizer"], arm["objective"]
@@ -228,6 +229,7 @@ def write_analysis(frame, output):
     if frame.empty:
         return pd.DataFrame(), []
 
+    frame = frame[frame["arm"].isin(ARMS)]
     # summary, figures and tests all describe the same seeds
     frame = complete_blocks(frame, "arm")
     # the one confirmatory test
@@ -240,7 +242,8 @@ def write_analysis(frame, output):
     frame = frame.copy()
     frame[DECISION_METRIC] = branch_decision(frame)
     plot_decision(frame, "arm", output / "figures" / "decision.pdf")
-    figures = plot_metric_boxes(frame, "arm", output / "figures")
+    figures = plot_metric_boxes(frame, "arm", output / "figures", order=ARMS,
+                                merge_branches=True)
 
     return comparison, figures
 
