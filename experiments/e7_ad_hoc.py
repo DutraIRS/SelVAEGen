@@ -17,7 +17,9 @@ from sklearn.metrics import silhouette_score
 CODE_DIR = Path(__file__).resolve().parents[1]
 if str(CODE_DIR) not in sys.path:
     sys.path.insert(0, str(CODE_DIR))
+sys.path.insert(0, str(CODE_DIR / "experiments"))
 
+import e6_compare_models as source_module
 from utils import DATA, RESULTS, save_figure, save_plot_data
 from utils.experiment_tools import experiment_dir, setup_compute
 
@@ -48,7 +50,7 @@ MAX_TARGETS = 10      # 10 x 40 = 400 rows, which still resolves on a page
 MORGAN = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
 
 ORACLE_MEMBERS = ("GraphDTAOracle", "GSDTAOracle", "BaselineOracle")
-ORACLE_SEEDS = (0, 1, 2)        # every seed is computed
+ORACLE_SEEDS = tuple(source_module.SEEDS)   # every seed e6 ran is computed
 WRITEUP_SEED = 0                # but only this one is drawn in the thesis
 ORACLE_REFERENCE_MOLECULES = 400
 ORACLE_CACHE_VERSION = 1

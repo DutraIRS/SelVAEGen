@@ -30,7 +30,7 @@ EXPERIMENT = "e9_warm_panel"
 SOURCE = "e6_compare"
 DATASETS = ["kiba", "bindingdb", "papyrus", "davis"]
 MODELS = ["SelVAEGen"]
-SEEDS = [0, 1, 2]
+SEEDS = list(source_module.SEEDS)
 
 COLD_BANDS = 4                     # similarity quartiles over the cold test targets
 TARGETS_PER_BAND = None            # None levels every band to the smallest one offered
