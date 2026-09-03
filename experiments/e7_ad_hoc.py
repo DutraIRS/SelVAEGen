@@ -21,7 +21,7 @@ sys.path.insert(0, str(CODE_DIR / "experiments"))
 
 import e6_compare_models as source_module
 from utils import DATA, RESULTS, save_figure, save_plot_data
-from utils.experiment_tools import experiment_dir, setup_compute
+from utils.experiment_tools import SUCCESS_THRESHOLD, experiment_dir, setup_compute
 
 DATASETS = ["kiba", "bindingdb", "papyrus", "davis"]
 SOURCE = "e6_compare"
@@ -279,6 +279,37 @@ def bootstrap_selectivity_ci(row, best_target, n_boot=N_BOOT, ci=0.95, rng=None)
     return np.quantile(boot, [alpha, 1 - alpha])
 
 
+def protein_names(dataset):
+    """{protein_id: gene symbol} from the cached UniProt lookup, empty if it was never run."""
+    path = DATA / dataset / "protein_names.csv"
+    if not path.exists():
+        return {}
+
+    table = pd.read_csv(path).dropna(subset=["gene"])
+
+    return dict(zip(table["protein_id"], table["gene"]))
+
+
+def protein_labels(dataset, ids):
+    """Gene symbols where UniProt knew the sequence, the raw id where it did not."""
+    names = protein_names(dataset)
+
+    return [str(names.get(value, value)) for value in ids]
+
+
+def potency_colormap(low, high, threshold, base="YlGn", steps=256):
+    """Grey below the potency threshold, the usual ramp above it, split at the threshold."""
+    from matplotlib.colors import ListedColormap
+
+    below = int(round(float(np.clip((threshold - low) / ((high - low) or 1.0), 0.0, 1.0)) * steps))
+
+    # greys lighten towards the threshold but stop short of white, then the potent band
+    # runs faint yellow to intense green
+    return ListedColormap(np.vstack([
+        plt.get_cmap("Greys")(np.linspace(0.92, 0.22, below)),
+        plt.get_cmap(base)(np.linspace(0.0, 1.0, steps - below))]))
+
+
 def selectivity_heatmap(dataset, run, branch, output, top=TOP, seed=SEED):
     long, _ = load_predictions(run, branch)
     if long.empty:
@@ -295,15 +326,35 @@ def selectivity_heatmap(dataset, run, branch, output, top=TOP, seed=SEED):
     eligible = designed.isin(wide.columns)
     designed = designed[eligible]
     wide = wide.loc[designed.index]
+
+    # a selectivity claim only counts for a molecule that is potent on the target it was designed for
+    threshold = SUCCESS_THRESHOLD[dataset]
+    on_target = pd.Series({molecule: wide.loc[molecule, designed[molecule]] for molecule in wide.index})
+    potent = on_target[on_target >= threshold].index
+    designed, wide = designed.loc[potent], wide.loc[potent]
+
+    if wide.shape[0] < 2:
+        print(f"{dataset:10s} {branch:5s} only {wide.shape[0]} molecule(s) reach {threshold:g} "
+                f"on their own target -- no heatmap")
+        return None
+
     best_target = wide.idxmax(axis=1)
     selectivity = pd.Series({molecule: row[designed[molecule]] - row.drop(designed[molecule]).mean() for molecule, row in wide.iterrows()}, name="selectivity")
 
     candidates = pd.DataFrame({"designed_for": designed, "selectivity": selectivity})
-    best_per_protein = candidates.groupby("designed_for")["selectivity"].idxmax()
-    top_mols = candidates.loc[best_per_protein].nlargest(top, "selectivity").index.tolist()
+    ranked = candidates.sort_values("selectivity", ascending=False)
+    leaders = ranked.loc[ranked.groupby("designed_for")["selectivity"].idxmax()]
+    top_mols = leaders.nlargest(top, "selectivity").index.tolist()
+
+    if len(top_mols) < top:
+        # too few targets survive the potency filter to fill the panel one molecule each,
+        # so keep taking the next most selective molecules even where a target repeats
+        chosen = set(top_mols)
+        top_mols += [molecule for molecule in ranked.index
+                        if molecule not in chosen][:top - len(top_mols)]
 
     row_best_targets = [best_target[m] for m in top_mols]
-    top_proteins = [designed[m] for m in top_mols]
+    top_proteins = list(dict.fromkeys(designed[m] for m in top_mols))
     data = wide.loc[top_mols, top_proteins]
 
     data.index = [f"M{i:02d}" for i in range(1, len(top_mols) + 1)]
@@ -316,21 +367,26 @@ def selectivity_heatmap(dataset, run, branch, output, top=TOP, seed=SEED):
 
     fig, (ax_heat, ax_sel) = plt.subplots(1, 2, figsize=(15, 10), sharey=True, gridspec_kw={"width_ratios": [4, 1], "wspace": -0.1})
 
-    sns.heatmap(data, cmap="Spectral", cbar_kws={"label": "Affinity"}, ax=ax_heat, linewidths=0.5, linecolor="gray")
+    low, high = float(np.nanmin(data.to_numpy())), float(np.nanmax(data.to_numpy()))
+    sns.heatmap(data, cmap=potency_colormap(low, high, threshold),
+                vmin=low, vmax=high, cbar_kws={"label": "Affinity"}, ax=ax_heat,
+                linewidths=0.5, linecolor="gray")
 
     for spine in ax_heat.spines.values():
         spine.set_visible(True)
         spine.set_linewidth(0.5)
         spine.set_edgecolor("gray")
 
-    ax_heat.set_xlabel("Protein ID")
+    ax_heat.set_xlabel("Target")
     ax_heat.set_ylabel("Generated Molecule")
     ax_heat.set_yticklabels(data.index, rotation=0)
-    ax_heat.set_xticklabels(data.columns, rotation=90)
+    ax_heat.set_xticklabels(protein_labels(dataset, data.columns), rotation=90)
 
     cbar = ax_heat.collections[0].colorbar
     cbar.set_label("")
-    cbar.ax.text(0.5, 0.5, f"Predicted Affinity ({ORACLE})", rotation=270, ha="center", va="center", transform=cbar.ax.transAxes, fontweight="bold")
+    # above the bar: the panels overlap sideways, so a rotated label lands on the next axes
+    cbar.ax.set_title("Predicted affinity", fontsize=10, fontweight="bold", pad=8)
+    cbar.ax.axhline(SUCCESS_THRESHOLD[dataset], color="#11181f", linewidth=1.2)
 
     y = np.arange(len(top_mols)) + 0.5
 
