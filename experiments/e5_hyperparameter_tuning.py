@@ -46,7 +46,7 @@ N_REFERENCE = 2000
 N_PANEL_TARGETS = None
 N_EVAL_TARGETS = None          # every cold target, not the best-measured ones
 
-BRANCH_FLAGS = dict(gnn_encoder=True, seq_encoder=True,
+BRANCH_FLAGS = dict(gnn_encoder=False, seq_encoder=True,
                     gnn_decoder=False, seq_decoder=True)
 LOSS_WEIGHTS = dict(w_affinity=1.0, w_selectivity=1.0, w_distributional=1.0)
 ACTIVE_BRANCHES = tuple(branch for branch, enabled in
@@ -118,7 +118,13 @@ def search_space(trial):
         weight_decay=trial.suggest_float("weight_decay", 1e-6, 1e-1, log=True),
         
         fusion_dim=trial.suggest_categorical("fusion_dim", [128, 256, 512]),
-        
+
+        seq_layers=trial.suggest_int("seq_layers", 2, 8),
+        seq_heads=trial.suggest_categorical("seq_heads", [4, 8, 16]),
+        seq_ff_dim=trial.suggest_categorical("seq_ff_dim", [512, 1024, 2048]),
+        seq_dropout=trial.suggest_float("seq_dropout", 0.0, 0.3),
+
+
         w_seq=trial.suggest_float("w_seq", 0.01, 5.0, log=True),
         w_kl_mean=trial.suggest_float("w_kl_mean", 0.001, 0.5, log=True),
         w_kl_var=trial.suggest_float("w_kl_var", 0.01, 5.0, log=True),
@@ -192,6 +198,8 @@ def main(device=None):
         learning_rate = space.pop("learning_rate")
         weight_decay = space.pop("weight_decay")
         fusion_dim = space.pop("fusion_dim")
+        transformer = {key: space.pop(key) for key in
+                        ("seq_layers", "seq_heads", "seq_ff_dim", "seq_dropout")}
 
         criterion = build_objective(
             train_table, train_loader.protein_embs, len(train_loader.drug_token_table),
@@ -201,7 +209,8 @@ def main(device=None):
 
         model = build_selvaegen(
             tokenizer, protein_dim, nodes, smiles_len, criterion=criterion,
-            fusion_dim=fusion_dim, fingerprint_dim=fingerprint_dim, **BRANCH_FLAGS).to(device)
+            fusion_dim=fusion_dim, fingerprint_dim=fingerprint_dim,
+            **transformer, **BRANCH_FLAGS).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
         def start(epoch):
