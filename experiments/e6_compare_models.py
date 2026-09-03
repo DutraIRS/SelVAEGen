@@ -65,13 +65,17 @@ EXPERIMENT = "e6_compare"
 
 SELVAEGEN_USE_SELFIES = True
 SELVAEGEN_PARAMS_SOURCE = "e2 seed 0, chosen by hand; e5 not yet transcribed"
-SELVAEGEN_BRANCH_FLAGS = dict(gnn_encoder=True, seq_encoder=True,
+SELVAEGEN_BRANCH_FLAGS = dict(gnn_encoder=False, seq_encoder=True,
                                 gnn_decoder=False, seq_decoder=True)
 # update after e5
 SELVAEGEN_PARAMS = dict(
     learning_rate=1e-4,
     weight_decay=1e-5,
     fusion_dim=512,
+    seq_layers=4,
+    seq_heads=8,
+    seq_ff_dim=1024,
+    seq_dropout=0.1,
     panel_size=PANEL_SIZE,
     w_seq=4.0,
     w_graph=1.0,
@@ -88,7 +92,7 @@ SELVAEGEN_PARAMS = dict(
 )
 
 OPTIMIZER_KEYS = ("learning_rate", "weight_decay")
-MODEL_KEYS = ("fusion_dim",)
+MODEL_KEYS = ("fusion_dim", "seq_layers", "seq_heads", "seq_ff_dim", "seq_dropout")
 OBJECTIVE_KEYS = ("panel_size",)
 
 
@@ -365,7 +369,8 @@ def write_analysis(frame, output):
     describe_arms(frame, "model", output / "summary.csv")
 
     plot_metric_boxes(frame, "model", output / "figures", order=MODELS)
-    plot_distributional_separation(frame, output, gaps=distributional_gap(frame, output))
+    distributional_gap(frame, output)
+    plot_distributional_separation(frame, output)
 
     done = frame.groupby("seed")["model"].nunique()
     complete = int((done >= len(MODELS)).sum())
@@ -380,7 +385,6 @@ GRIDLINE = "#e1e0d9"
 AXIS_RULE = "#c3c2b7"
 ON_COLOUR = "#2a78d6"
 OFF_COLOUR = "#eb6834"
-MODEL_COLOURS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
 
 
 def style_axes(axes):
@@ -431,50 +435,34 @@ def pooled_affinities(output, block, model):
             np.concatenate([off_target for _, off_target in kept]))
 
 
-def survival(grid, curve):
-    """Mass of `curve` above every point of `grid`, by trapezoid accumulated from the right."""
-    steps = np.diff(grid) * 0.5 * (curve[:-1] + curve[1:])
-
-    return np.concatenate([np.cumsum(steps[::-1])[::-1], [0.0]])
-
-
-def distributional_gap(frame, output, max_kde_points=50000, cuts=2000):
+def distributional_gap(frame, output, max_kde_points=50000):
     """Per seed, the threshold-to-infinity integral of on-target minus off-target density."""
     from scipy.stats import gaussian_kde
 
     dataset = str(frame["dataset"].iloc[0])
     threshold = SUCCESS_THRESHOLD[dataset]
     rng = np.random.default_rng(0)
-    runs, floor, ceiling = [], [], []
+    runs = []
 
-    def estimator(values):
+    def tail_mass(values):
+        """The estimate's own mass above the threshold, integrated analytically out to +inf."""
         sample = (rng.choice(values, max_kde_points, replace=False) if len(values) > max_kde_points else values)
-        return gaussian_kde(sample)
+        return float(gaussian_kde(sample).integrate_box_1d(threshold, np.inf))
 
     for model in MODELS:
         for seed in sorted(frame.loc[frame["model"] == model, "seed"].unique()):
             on_target, off_target = seed_affinities(output, model, seed)
             if on_target is None:
                 continue
+            on_tail, off_tail = tail_mass(on_target), tail_mass(off_target)
             runs.append({"dataset": dataset, "model": model, "seed": int(seed), "threshold": threshold,
-                            "on_kde": estimator(on_target), "off_kde": estimator(off_target)})
-            floor.append(float(min(on_target.min(), off_target.min())))
-            ceiling.append(float(max(on_target.max(), off_target.max())))
+                            "on_target_tail_mass": on_tail, "off_target_tail_mass": off_tail,
+                            "tail_mass_gap": on_tail - off_tail})
+            # a run's off-target block runs to millions of rows
             del on_target, off_target
 
     if not runs:
         return pd.DataFrame()
-
-    margin = 0.05 * (max(ceiling) - min(floor))
-    cut = np.linspace(min(floor) - margin, max(ceiling) + margin, cuts)
-    index = int(np.searchsorted(cut, threshold))
-
-    for run in runs:
-        on_above = survival(cut, run.pop("on_kde")(cut))
-        off_above = survival(cut, run.pop("off_kde")(cut))
-        run["on_target_tail_mass"] = float(on_above[index])
-        run["off_target_tail_mass"] = float(off_above[index])
-        run["tail_mass_gap"] = float(on_above[index] - off_above[index])
 
     by_seed = pd.DataFrame(runs)
     summary = by_seed.groupby("model", sort=False).agg(
@@ -488,13 +476,19 @@ def distributional_gap(frame, output, max_kde_points=50000, cuts=2000):
     summary.insert(0, "dataset", dataset)
     summary.insert(2, "threshold", threshold)
 
+    delta = frame.groupby("model")["seq_MeanOracle_distributional_delta_score"].agg(["mean", "std"])
+    summary["mean_delta_score"] = summary["model"].map(delta["mean"])
+    summary["delta_score_std"] = summary["model"].map(delta["std"])
+
+    # one row per model: the gap and the delta score, each with its spread over the seeds
     summary.rename(columns={"tail_mass_gap": "mean_gap", "tail_mass_gap_std": "std"})[
-        ["model", "mean_gap", "std"]].to_csv(Path(output) / "distributional_gap.csv", index=False)
+        ["model", "mean_gap", "std", "mean_delta_score", "delta_score_std"]].to_csv(
+            Path(output) / "distributional_gap.csv", index=False)
 
     print(f"  distributional gap above {threshold:g} ({dataset}), mean over seeds:")
     for row in summary.itertuples():
-        print(f"    {row.model:12s} on {row.on_target_tail_mass:.4f}  off {row.off_target_tail_mass:.4f}"
-                f"  gap {row.tail_mass_gap:+.4f} +- {row.tail_mass_gap_std:.4f}  ({row.seeds} seeds)")
+        print(f"    {row.model:12s} gap {row.tail_mass_gap:+.4f} +- {row.tail_mass_gap_std:.4f}"
+                f"   delta {row.mean_delta_score:+.4f} +- {row.delta_score_std:.4f}  ({row.seeds} seeds)")
 
     return summary
 
@@ -522,7 +516,6 @@ def estimate_panels(frame, output, threshold, max_kde_points, rng):
         values = block[metric].dropna().to_numpy(dtype=float)
         panels.append({"model": model, "on_kde": estimator(on_target), "off_kde": estimator(off_target),
                         "low": float(low), "high": float(high),
-                        "floor": float(pooled.min()), "ceiling": float(pooled.max()),
                         "on_target_n": len(on_target), "off_target_n": len(off_target),
                         "seeds": len(values),
                         "delta_mean": float(values.mean()) if len(values) else float("nan"),
@@ -533,13 +526,10 @@ def estimate_panels(frame, output, threshold, max_kde_points, rng):
     return panels
 
 
-def plot_distributional_separation(frame, output, gaps=None, max_kde_points=50000, cuts=2000):
+def plot_distributional_separation(frame, output, max_kde_points=50000):
     """Pooled on- and off-target MeanOracle densities on shared axes, one panel per model."""
     from matplotlib import pyplot as plt
 
-    spread = ({} if gaps is None or gaps.empty
-                else gaps.set_index("model")[["on_target_tail_mass", "off_target_tail_mass",
-                                                "tail_mass_gap", "tail_mass_gap_std"]].to_dict("index"))
     dataset = str(frame["dataset"].iloc[0])
     threshold = SUCCESS_THRESHOLD[dataset]
     directory = Path(output) / "figures" / "distributional_separation"
@@ -553,86 +543,39 @@ def plot_distributional_separation(frame, output, gaps=None, max_kde_points=5000
     high = max(panel["high"] for panel in panels)
     pad = 0.08 * ((high - low) or 1.0)
     grid = np.linspace(low - pad, high + pad, 400)
-    # the integrals get their own wider grid, past the tails the window clips
-    margin = 0.05 * (max(p["ceiling"] for p in panels) - min(p["floor"] for p in panels))
-    cut = np.linspace(min(p["floor"] for p in panels) - margin,
-                        max(p["ceiling"] for p in panels) + margin, cuts)
-    at_threshold = int(np.searchsorted(cut, threshold))
 
     for panel in panels:
-        panel["grid"], panel["cut"] = grid, cut
+        panel["grid"] = grid
         panel["on_density"], panel["off_density"] = panel["on_kde"](grid), panel["off_kde"](grid)
-        panel["on_above"] = survival(cut, panel["on_kde"](cut))
-        panel["off_above"] = survival(cut, panel["off_kde"](cut))
-        panel["gap"] = panel["on_above"] - panel["off_above"]
-        peak = int(panel["gap"].argmax())
+        # the window clips the tails, so the integrals go to the estimate itself, not to the grid
+        on_tail = float(panel["on_kde"].integrate_box_1d(threshold, np.inf))
+        off_tail = float(panel["off_kde"].integrate_box_1d(threshold, np.inf))
         panel["scalars"] = {"distributional_delta_mean": panel["delta_mean"],
                             "distributional_delta_std": panel["delta_std"],
                             "seeds": panel["seeds"], "on_target_n": panel["on_target_n"],
                             "off_target_n": panel["off_target_n"], "threshold": threshold,
-                            "on_target_mass": float(panel["on_above"][0]),
-                            "off_target_mass": float(panel["off_above"][0]),
-                            "on_target_tail_mass": float(panel["on_above"][at_threshold]),
-                            "off_target_tail_mass": float(panel["off_above"][at_threshold]),
-                            "tail_mass_gap": float(panel["gap"][at_threshold]),
-                            "best_cut": float(cut[peak]),
-                            "best_tail_mass_gap": float(panel["gap"][peak])}
+                            "on_target_tail_mass": on_tail,
+                            "off_target_tail_mass": off_tail,
+                            "tail_mass_gap": on_tail - off_tail}
 
-    def draw(axes, panel, title=True):
+    def draw(axes, panel):
         density_on, density_off = panel["on_density"], panel["off_density"]
         tail = grid >= threshold
-        axes.axvline(threshold, color=INK_MUTED, linestyle=(0, (4, 3)), linewidth=1.0,
-                        label=f"Threshold {threshold:g}", zorder=1)
+        # only the two curves are named; the rule and the shading read off them
+        axes.axvline(threshold, color=INK_MUTED, linestyle=(0, (4, 3)), linewidth=1.0, zorder=1)
         axes.fill_between(grid, density_on, density_off, where=tail & (density_on >= density_off),
-                            color=ON_COLOUR, alpha=0.22, linewidth=0, zorder=2,
-                            label="On-target excess above threshold")
+                            color=ON_COLOUR, alpha=0.22, linewidth=0, zorder=2)
         axes.fill_between(grid, density_on, density_off, where=tail & (density_off > density_on),
-                            color=OFF_COLOUR, alpha=0.22, linewidth=0, zorder=2,
-                            label="Off-target excess above threshold")
+                            color=OFF_COLOUR, alpha=0.22, linewidth=0, zorder=2)
         axes.plot(grid, density_off, color=OFF_COLOUR, linewidth=2.0, label="Off-target", zorder=3)
         axes.plot(grid, density_on, color=ON_COLOUR, linewidth=2.0, label="On-target", zorder=4)
 
-        scalars = panel["scalars"]
-        axes.text(0.035, 0.955, panel["model"] if title else "", transform=axes.transAxes,
-                    va="top", ha="left", fontsize=11, color=INK)
-        quoted = spread.get(panel["model"], scalars)
-        over_seeds = spread.get(panel["model"])
-        axes.text(0.975, 0.955, f"on {quoted['on_target_tail_mass']:.4f}    "
-                                f"off {quoted['off_target_tail_mass']:.4f}",
-                    transform=axes.transAxes, va="top", ha="right", fontsize=9, color=INK_SECONDARY)
-        label = (f"gap {scalars['tail_mass_gap']:+.4f}" if over_seeds is None else
-                    f"gap {over_seeds['tail_mass_gap']:+.4f} $\\pm$ {over_seeds['tail_mass_gap_std']:.4f}")
-        axes.text(0.975, 0.868, label, transform=axes.transAxes,
-                    va="top", ha="right", fontsize=11.5, color=INK)
-        axes.set_ylim(0, 1.28 * max(density_on.max(), density_off.max()))
+        axes.set_title(panel["model"], fontsize=11, color=INK, loc="left", pad=6)
         axes.set_xlim(grid[0], grid[-1])
         style_axes(axes)
 
-    def bottom_legend(figure, axes, ncol=5):
-        handles, labels = axes.get_legend_handles_labels()
-        order = [labels.index(name) for name in ("On-target", "Off-target",
-                                                    "On-target excess above threshold",
-                                                    "Off-target excess above threshold",
-                                                    f"Threshold {threshold:g}")]
-        figure.legend([handles[index] for index in order], [labels[index] for index in order],
-                        loc="lower center", ncol=ncol, frameon=False, fontsize=9,
-                        labelcolor=INK_SECONDARY)
-
-    for panel in panels:
-        figure, axes = plt.subplots(figsize=(6.8, 4.4))
-        figure.patch.set_facecolor(SURFACE)
-        draw(axes, panel)
-        axes.set_xlabel("Predicted affinity", color=INK_SECONDARY, fontsize=9.5)
-        axes.set_ylabel("Density", color=INK_SECONDARY, fontsize=9.5)
-        bottom_legend(figure, axes, ncol=3)
-        figure.tight_layout(rect=(0, 0.12, 1, 1))
-
-        path = directory / f"{panel['model']}.pdf"
-        save_figure(figure, path, dpi=200, close=False)
-        panel_table(panel, dataset).to_csv(path.with_suffix(".csv"), index=False)
-        plt.close(figure)
-
-    figure, cells = plt.subplots(1, len(panels), figsize=(3.5 * len(panels), 3.9), sharex=True)
+    figure, cells = plt.subplots(1, len(panels), figsize=(3.5 * len(panels), 3.9),
+                                    sharex=True, sharey=True)
     figure.patch.set_facecolor(SURFACE)
     cells = np.atleast_1d(cells)
     for axes, panel in zip(cells, panels):
@@ -640,58 +583,15 @@ def plot_distributional_separation(frame, output, gaps=None, max_kde_points=5000
         axes.set_xlabel("Predicted affinity", color=INK_SECONDARY, fontsize=9.5)
     cells[0].set_ylabel("Density", color=INK_SECONDARY, fontsize=9.5)
 
-    bottom_legend(figure, cells[0])
+    handles, labels = cells[0].get_legend_handles_labels()
+    order = [labels.index(name) for name in ("On-target", "Off-target")]
+    figure.legend([handles[index] for index in order], [labels[index] for index in order],
+                    loc="lower center", ncol=2, frameon=False, fontsize=9,
+                    labelcolor=INK_SECONDARY)
     figure.tight_layout(rect=(0, 0.075, 1, 1))
     path = directory / "models_side_by_side.pdf"
     pd.concat([panel_table(panel, dataset) for panel in panels],
                 ignore_index=True).to_csv(path.with_suffix(".csv"), index=False)
-    save_figure(figure, path, dpi=200)
-
-    plot_tail_mass_sweep(panels, dataset, threshold, directory)
-
-
-def plot_tail_mass_sweep(panels, dataset, threshold, directory):
-    from matplotlib import pyplot as plt
-
-    figure, (left, right) = plt.subplots(1, 2, figsize=(10.4, 4.1), sharex=True)
-    figure.patch.set_facecolor(SURFACE)
-    tables = []
-
-    for index, panel in enumerate(panels):
-        colour = MODEL_COLOURS[index % len(MODEL_COLOURS)]
-        left.plot(panel["cut"], panel["on_above"], color=colour, linewidth=2.0, label=panel["model"])
-        right.plot(panel["cut"], panel["gap"], color=colour, linewidth=2.0, label=panel["model"])
-        tables.append(pd.DataFrame({"dataset": dataset, "model": panel["model"], "cut": panel["cut"],
-                                    "on_target_tail_mass": panel["on_above"],
-                                    "off_target_tail_mass": panel["off_above"],
-                                    "tail_mass_gap": panel["gap"], "threshold": threshold}))
-
-    leader = max(panels, key=lambda panel: panel["scalars"]["best_tail_mass_gap"])
-    best_cut = leader["scalars"]["best_cut"]
-    best_gap = leader["scalars"]["best_tail_mass_gap"]
-    right.plot([best_cut], [best_gap], marker="o", markersize=6, zorder=5,
-                color=MODEL_COLOURS[panels.index(leader) % len(MODEL_COLOURS)],
-                markeredgecolor=SURFACE, markeredgewidth=2)
-    right.set_title(f"widest gap   {leader['model']}  {best_gap:+.3f} at cut {best_cut:.2f}",
-                    loc="right", fontsize=9, color=INK, pad=6)
-
-    right.axhline(0.0, color=AXIS_RULE, linewidth=0.8, zorder=1)
-    left.set_ylabel("On-target mass above the cut", color=INK_SECONDARY, fontsize=9.5)
-    right.set_ylabel("On-target minus off-target mass above the cut", color=INK_SECONDARY, fontsize=9.5)
-
-    for axes in (left, right):
-        axes.axvline(threshold, color=INK_MUTED, linestyle=(0, (4, 3)), linewidth=1.0, zorder=1)
-        axes.annotate(f"threshold {threshold:g}", xy=(threshold, 1.0), xycoords=("data", "axes fraction"),
-                        xytext=(4, -10), textcoords="offset points", fontsize=8.5, color=INK_MUTED)
-        axes.set_xlabel("Cut on predicted affinity", color=INK_SECONDARY, fontsize=9.5)
-        style_axes(axes)
-
-    left.legend(frameon=False, fontsize=9, loc="upper right", labelcolor=INK_SECONDARY)
-    figure.suptitle(f"{dataset} — separation against the choice of cut", fontsize=11.5,
-                    color=INK, x=0.01, ha="left")
-    figure.tight_layout(rect=(0, 0, 1, 0.95))
-    path = directory / "tail_mass_sweep.pdf"
-    pd.concat(tables, ignore_index=True).to_csv(path.with_suffix(".csv"), index=False)
     save_figure(figure, path, dpi=200)
 
 
