@@ -20,7 +20,7 @@ from utils.data_tools import MAX_SMILES_LEN, load_tokenizer
 
 DATASETS = ["kiba", "bindingdb", "papyrus", "davis"]
 FP_DIM = 2048         # bits per hashed fingerprint, before PCA
-FINAL_DIM = 60        # components kept
+FINAL_DIM = {"kiba": 512, "bindingdb": 512, "papyrus": 512, "davis": 60}
 JOBS = os.cpu_count()
 
 def screen_smiles(smiles, tokenizer):
@@ -76,7 +76,7 @@ def process_dataset(dataset, fp_dim=512, final_dim=512, n_jobs=8):
 def main():
     for dataset in DATASETS:
         print(f"\n=== {dataset}", flush=True)
-        process_dataset(dataset, fp_dim=FP_DIM, final_dim=FINAL_DIM, n_jobs=JOBS)
+        process_dataset(dataset, fp_dim=FP_DIM, final_dim=FINAL_DIM[dataset], n_jobs=JOBS)
 
 
 if __name__ == "__main__":
